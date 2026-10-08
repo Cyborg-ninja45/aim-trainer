@@ -1,0 +1,2599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aim Trainer</title>
+
+<style>
+html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: #05070a;
+    overflow: hidden;
+}
+
+body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+canvas {
+    display: block;
+    width: min(100vw, calc(100vh * 1100 / 720));
+    height: min(100vh, calc(100vw * 720 / 1100));
+    background: #0d1017;
+    cursor: default;
+}
+
+body.game canvas {
+    cursor: none;
+}
+</style>
+</head>
+
+<body>
+
+<canvas id="game" width="1100" height="720"></canvas>
+
+<script>
+"use strict";
+
+/* ============================================================
+   AIM TRAINER - BROWSER VERSION
+   Original gameplay converted from Pygame
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const WIDTH = 1100;
+const HEIGHT = 720;
+const GAME_TIME = 30;
+
+const COLORS = {
+    BG: "#0d1017",
+    PANEL: "#161b26",
+    PANEL2: "#1c222f",
+    WHITE: "#f0f4fa",
+    MUTED: "#919baf",
+    RED: "#eb414b",
+    GREEN: "#46dc82",
+    YELLOW: "#f5cd50",
+    BLUE: "#50a0ff",
+    PURPLE: "#af6eff",
+    CYAN: "#46dce6",
+    BLACK: "#05070a"
+};
+
+const MODES = [
+    "Classic",
+    "Speed",
+    "Precision",
+    "Endless",
+    "Reaction"
+];
+
+const DIFFICULTIES = {
+    Easy: {
+        radius: 50,
+        move_time: 1.30,
+        speed: 180
+    },
+
+    Normal: {
+        radius: 42,
+        move_time: 0.90,
+        speed: 260
+    },
+
+    Hard: {
+        radius: 34,
+        move_time: 0.65,
+        speed: 360
+    },
+
+    Insane: {
+        radius: 25,
+        move_time: 0.42,
+        speed: 500
+    }
+};
+
+const DIFFICULTY_NAMES = Object.keys(DIFFICULTIES);
+
+
+/* ============================================================
+   GAME STATE
+   ============================================================ */
+
+let state = "menu";
+
+let modeIndex = 0;
+let difficultyIndex = 1;
+
+let selectedMode = MODES[modeIndex];
+let selectedDifficulty = DIFFICULTY_NAMES[difficultyIndex];
+
+let score = 0;
+let hits = 0;
+let misses = 0;
+let streak = 0;
+let bestStreakSession = 0;
+
+let reactionTimes = [];
+
+let gameStartTime = 0;
+
+let targetX = WIDTH / 2;
+let targetY = HEIGHT / 2;
+let targetRadius = 42;
+
+let targetVX = 0;
+let targetVY = 0;
+
+let targetSpawnTime = 0;
+let targetMoveTimer = 0;
+
+let roundNumber = 1;
+
+let feedbackText = "";
+let feedbackColor = COLORS.WHITE;
+let feedbackTimer = 0;
+
+let hitEffects = [];
+let floatingTexts = [];
+
+let crosshairStyle = 0;
+let crosshairEnabled = true;
+let effectsEnabled = true;
+
+let historyScroll = 0;
+
+let mouseX = WIDTH / 2;
+let mouseY = HEIGHT / 2;
+
+let lastTime = performance.now();
+
+let audioContext = null;
+
+
+/* ============================================================
+   DATA
+   ============================================================ */
+
+const DEFAULT_DATA = {
+    high_score: 0,
+    best_accuracy: 0,
+    best_reaction: 9999,
+    best_streak: 0,
+    sessions: []
+};
+
+let data = loadData();
+
+
+function loadData() {
+    try {
+        const saved = localStorage.getItem("aim_trainer_data");
+
+        if (!saved) {
+            return JSON.parse(JSON.stringify(DEFAULT_DATA));
+        }
+
+        const loaded = JSON.parse(saved);
+
+        return {
+            ...DEFAULT_DATA,
+            ...loaded
+        };
+
+    } catch (error) {
+        return JSON.parse(JSON.stringify(DEFAULT_DATA));
+    }
+}
+
+
+function saveData() {
+    try {
+        localStorage.setItem(
+            "aim_trainer_data",
+            JSON.stringify(data)
+        );
+    } catch (error) {
+        // Browser storage unavailable.
+    }
+}
+
+
+/* ============================================================
+   HELPERS
+   ============================================================ */
+
+function clamp(value, minimum, maximum) {
+    return Math.max(
+        minimum,
+        Math.min(maximum, value)
+    );
+}
+
+
+function accuracyValue() {
+    const total = hits + misses;
+
+    if (total === 0) {
+        return 100;
+    }
+
+    return hits / total * 100;
+}
+
+
+function drawText(
+    value,
+    size,
+    color,
+    x,
+    y,
+    center = false
+) {
+    ctx.font = `${size}px Arial, sans-serif`;
+    ctx.fillStyle = color;
+    ctx.textAlign = center ? "center" : "left";
+    ctx.textBaseline = "top";
+
+    ctx.fillText(
+        String(value),
+        x,
+        y
+    );
+}
+
+
+function roundedRect(
+    x,
+    y,
+    width,
+    height,
+    radius
+) {
+    const r = Math.min(
+        radius,
+        width / 2,
+        height / 2
+    );
+
+    ctx.beginPath();
+
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(
+        x + width,
+        y,
+        x + width,
+        y + height,
+        r
+    );
+
+    ctx.arcTo(
+        x + width,
+        y + height,
+        x,
+        y + height,
+        r
+    );
+
+    ctx.arcTo(
+        x,
+        y + height,
+        x,
+        y,
+        r
+    );
+
+    ctx.arcTo(
+        x,
+        y,
+        x + width,
+        y,
+        r
+    );
+
+    ctx.closePath();
+}
+
+
+function drawPanel(
+    x,
+    y,
+    width,
+    height,
+    radius = 14,
+    color = COLORS.PANEL
+) {
+    ctx.fillStyle = color;
+
+    roundedRect(
+        x,
+        y,
+        width,
+        height,
+        radius
+    );
+
+    ctx.fill();
+}
+
+
+function getMousePosition(event) {
+    const rect = canvas.getBoundingClientRect();
+
+    return {
+        x: clamp(
+            (event.clientX - rect.left)
+            * WIDTH / rect.width,
+            0,
+            WIDTH - 1
+        ),
+
+        y: clamp(
+            (event.clientY - rect.top)
+            * HEIGHT / rect.height,
+            0,
+            HEIGHT - 1
+        )
+    };
+}
+
+
+/* ============================================================
+   SOUND
+   ============================================================ */
+
+function unlockAudio() {
+    try {
+        if (!audioContext) {
+            const Audio =
+                window.AudioContext ||
+                window.webkitAudioContext;
+
+            if (!Audio) {
+                return;
+            }
+
+            audioContext = new Audio();
+        }
+
+        if (audioContext.state === "suspended") {
+            audioContext.resume();
+        }
+
+    } catch (error) {
+        // Sound unavailable.
+    }
+}
+
+
+function playTone(
+    frequency,
+    duration,
+    volume
+) {
+    try {
+        unlockAudio();
+
+        if (!audioContext) {
+            return;
+        }
+
+        const oscillator =
+            audioContext.createOscillator();
+
+        const gain =
+            audioContext.createGain();
+
+        const now =
+            audioContext.currentTime;
+
+        oscillator.type = "sine";
+
+        oscillator.frequency.value =
+            frequency;
+
+        gain.gain.setValueAtTime(
+            0,
+            now
+        );
+
+        gain.gain.linearRampToValueAtTime(
+            volume,
+            now + 0.005
+        );
+
+        gain.gain.exponentialRampToValueAtTime(
+            0.001,
+            now + duration
+        );
+
+        oscillator.connect(gain);
+        gain.connect(audioContext.destination);
+
+        oscillator.start(now);
+
+        oscillator.stop(
+            now + duration + 0.02
+        );
+
+    } catch (error) {
+        // Sound unavailable.
+    }
+}
+
+
+function playHitSound() {
+    playTone(720, 0.055, 0.18);
+}
+
+
+function playMissSound() {
+    playTone(150, 0.09, 0.15);
+}
+
+
+function playComboSound() {
+    playTone(1100, 0.07, 0.16);
+}
+
+
+function playRecordSound() {
+    playTone(1400, 0.15, 0.18);
+}
+
+
+/* ============================================================
+   TARGET
+   ============================================================ */
+
+function spawnTarget(initial = false) {
+
+    const difficulty =
+        DIFFICULTIES[selectedDifficulty];
+
+    let sizeBonus = 0;
+
+    if (selectedMode === "Precision") {
+        sizeBonus = -7;
+    }
+
+    else if (selectedMode === "Speed") {
+        sizeBonus = -5;
+    }
+
+    targetRadius = Math.max(
+        17,
+        difficulty.radius
+        + sizeBonus
+        - Math.round(roundNumber * 0.65)
+    );
+
+    const oldX = targetX;
+    const oldY = targetY;
+
+    for (let i = 0; i < 30; i++) {
+
+        const newX =
+            Math.floor(
+                80 +
+                targetRadius +
+                Math.random() *
+                (
+                    WIDTH -
+                    160 -
+                    targetRadius * 2
+                )
+            );
+
+        const newY =
+            Math.floor(
+                145 +
+                targetRadius +
+                Math.random() *
+                (
+                    HEIGHT -
+                    200 -
+                    targetRadius * 2
+                )
+            );
+
+        const distance =
+            Math.hypot(
+                newX - oldX,
+                newY - oldY
+            );
+
+        if (
+            initial ||
+            distance > 140
+        ) {
+            targetX = newX;
+            targetY = newY;
+            break;
+        }
+    }
+
+    let moveTime =
+        difficulty.move_time;
+
+    if (selectedMode === "Speed") {
+
+        moveTime = Math.max(
+            0.25,
+            difficulty.move_time -
+            roundNumber * 0.015
+        );
+    }
+
+    else if (selectedMode === "Precision") {
+
+        moveTime = Math.max(
+            0.50,
+            difficulty.move_time + 0.10
+        );
+    }
+
+    targetMoveTimer = moveTime;
+
+    targetSpawnTime =
+        performance.now();
+
+    const speed =
+        difficulty.speed;
+
+    const angle =
+        Math.random() *
+        Math.PI *
+        2;
+
+    targetVX =
+        Math.cos(angle) * speed;
+
+    targetVY =
+        Math.sin(angle) * speed;
+}
+
+
+function moveTarget(dt) {
+
+    targetX += targetVX * dt;
+    targetY += targetVY * dt;
+
+    const left =
+        80 + targetRadius;
+
+    const right =
+        WIDTH -
+        80 -
+        targetRadius;
+
+    const top =
+        145 +
+        targetRadius;
+
+    const bottom =
+        HEIGHT -
+        55 -
+        targetRadius;
+
+    if (targetX <= left) {
+        targetX = left;
+        targetVX *= -1;
+    }
+
+    if (targetX >= right) {
+        targetX = right;
+        targetVX *= -1;
+    }
+
+    if (targetY <= top) {
+        targetY = top;
+        targetVY *= -1;
+    }
+
+    if (targetY >= bottom) {
+        targetY = bottom;
+        targetVY *= -1;
+    }
+}
+
+
+/* ============================================================
+   EFFECTS
+   ============================================================ */
+
+function addHitEffect(x, y) {
+
+    if (!effectsEnabled) {
+        return;
+    }
+
+    hitEffects.push({
+        x: x,
+        y: y,
+        radius: 10,
+        alpha: 255,
+        life: 0.35
+    });
+}
+
+
+function addFloatingText(
+    value,
+    x,
+    y,
+    color
+) {
+
+    if (!effectsEnabled) {
+        return;
+    }
+
+    floatingTexts.push({
+        text: value,
+        x: x,
+        y: y,
+        color: color,
+        life: 0.8
+    });
+}
+
+
+function updateEffects(dt) {
+
+    for (
+        let i = hitEffects.length - 1;
+        i >= 0;
+        i--
+    ) {
+
+        const effect =
+            hitEffects[i];
+
+        effect.radius +=
+            150 * dt;
+
+        effect.life -= dt;
+
+        effect.alpha =
+            Math.max(
+                0,
+                effect.life /
+                0.35 *
+                255
+            );
+
+        if (effect.life <= 0) {
+            hitEffects.splice(i, 1);
+        }
+    }
+
+
+    for (
+        let i = floatingTexts.length - 1;
+        i >= 0;
+        i--
+    ) {
+
+        const effect =
+            floatingTexts[i];
+
+        effect.y -=
+            55 * dt;
+
+        effect.life -= dt;
+
+        if (effect.life <= 0) {
+            floatingTexts.splice(i, 1);
+        }
+    }
+}
+
+
+function drawEffects() {
+
+    for (const effect of hitEffects) {
+
+        ctx.beginPath();
+
+        ctx.strokeStyle =
+            `rgba(70,220,130,${
+                effect.alpha / 255
+            })`;
+
+        ctx.lineWidth = 3;
+
+        ctx.arc(
+            effect.x,
+            effect.y,
+            effect.radius,
+            0,
+            Math.PI * 2
+        );
+
+        ctx.stroke();
+    }
+
+
+    for (const effect of floatingTexts) {
+
+        ctx.globalAlpha =
+            clamp(
+                effect.life / 0.8,
+                0,
+                1
+            );
+
+        drawText(
+            effect.text,
+            34,
+            effect.color,
+            effect.x,
+            effect.y,
+            true
+        );
+
+        ctx.globalAlpha = 1;
+    }
+}
+
+
+/* ============================================================
+   TARGET DRAWING
+   ============================================================ */
+
+function drawTarget() {
+
+    const x = targetX;
+    const y = targetY;
+    const r = targetRadius;
+
+    const glow =
+        [
+            [15, 0.08],
+            [10, 0.12],
+            [5, 0.18]
+        ];
+
+    for (const [extra, alpha] of glow) {
+
+        ctx.beginPath();
+
+        ctx.fillStyle =
+            `rgba(235,65,75,${alpha})`;
+
+        ctx.arc(
+            x,
+            y,
+            r + extra,
+            0,
+            Math.PI * 2
+        );
+
+        ctx.fill();
+    }
+
+
+    ctx.beginPath();
+    ctx.fillStyle = COLORS.WHITE;
+
+    ctx.arc(
+        x,
+        y,
+        r,
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fill();
+
+
+    ctx.beginPath();
+    ctx.fillStyle = COLORS.RED;
+
+    ctx.arc(
+        x,
+        y,
+        Math.max(1, r - 5),
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fill();
+
+
+    ctx.beginPath();
+    ctx.fillStyle = COLORS.WHITE;
+
+    ctx.arc(
+        x,
+        y,
+        Math.max(1, r / 2),
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fill();
+
+
+    ctx.beginPath();
+    ctx.fillStyle = COLORS.RED;
+
+    ctx.arc(
+        x,
+        y,
+        Math.max(1, r / 4),
+        0,
+        Math.PI * 2
+    );
+
+    ctx.fill();
+}
+
+
+/* ============================================================
+   CROSSHAIR
+   ============================================================ */
+
+function drawCrosshair() {
+
+    if (!crosshairEnabled) {
+        return;
+    }
+
+    const x = mouseX;
+    const y = mouseY;
+
+    ctx.strokeStyle =
+        COLORS.WHITE;
+
+    ctx.fillStyle =
+        COLORS.RED;
+
+    ctx.lineWidth = 2;
+
+
+    if (crosshairStyle === 0) {
+
+        const length = 11;
+        const gap = 5;
+
+        const lines = [
+            [x - length, y, x - gap, y],
+            [x + gap, y, x + length, y],
+            [x, y - length, x, y - gap],
+            [x, y + gap, x, y + length]
+        ];
+
+        for (const line of lines) {
+
+            ctx.beginPath();
+
+            ctx.moveTo(
+                line[0],
+                line[1]
+            );
+
+            ctx.lineTo(
+                line[2],
+                line[3]
+            );
+
+            ctx.stroke();
+        }
+    }
+
+
+    else if (crosshairStyle === 1) {
+
+        ctx.beginPath();
+
+        ctx.arc(
+            x,
+            y,
+            10,
+            0,
+            Math.PI * 2
+        );
+
+        ctx.stroke();
+
+
+        ctx.beginPath();
+
+        ctx.arc(
+            x,
+            y,
+            2,
+            0,
+            Math.PI * 2
+        );
+
+        ctx.fill();
+    }
+
+
+    else {
+
+        ctx.beginPath();
+
+        ctx.moveTo(
+            x - 13,
+            y
+        );
+
+        ctx.lineTo(
+            x + 13,
+            y
+        );
+
+        ctx.moveTo(
+            x,
+            y - 13
+        );
+
+        ctx.lineTo(
+            x,
+            y + 13
+        );
+
+        ctx.stroke();
+    }
+}
+
+
+/* ============================================================
+   START GAME
+   ============================================================ */
+
+function startGame() {
+
+    state = "game";
+
+    document.body.classList.add("game");
+
+    canvas.focus();
+
+    score = 0;
+    hits = 0;
+    misses = 0;
+    streak = 0;
+
+    bestStreakSession = 0;
+
+    reactionTimes = [];
+
+    roundNumber = 1;
+
+    feedbackText = "";
+    feedbackTimer = 0;
+
+    hitEffects = [];
+    floatingTexts = [];
+
+    gameStartTime =
+        performance.now();
+
+    spawnTarget(true);
+
+    unlockAudio();
+}
+
+
+/* ============================================================
+   HIT
+   ============================================================ */
+
+function hitTarget() {
+
+    const reaction =
+        performance.now() -
+        targetSpawnTime;
+
+    hits++;
+
+    streak++;
+
+    bestStreakSession =
+        Math.max(
+            bestStreakSession,
+            streak
+        );
+
+    reactionTimes.push(
+        reaction
+    );
+
+
+    let points = 100;
+
+
+    if (reaction < 250) {
+        points += 150;
+    }
+
+    else if (reaction < 400) {
+        points += 100;
+    }
+
+    else if (reaction < 600) {
+        points += 50;
+    }
+
+
+    const comboBonus =
+        Math.min(
+            streak * 10,
+            200
+        );
+
+    points += comboBonus;
+
+
+    if (selectedMode === "Precision") {
+        points =
+            Math.floor(
+                points * 1.25
+            );
+    }
+
+
+    if (selectedMode === "Speed") {
+        points =
+            Math.floor(
+                points * 1.15
+            );
+    }
+
+
+    score += points;
+
+
+    feedbackText =
+        `+${points}`;
+
+    feedbackColor =
+        COLORS.GREEN;
+
+    feedbackTimer = 0.5;
+
+
+    addHitEffect(
+        targetX,
+        targetY
+    );
+
+
+    addFloatingText(
+        `+${points}`,
+        targetX,
+        targetY -
+        targetRadius -
+        10,
+        COLORS.GREEN
+    );
+
+
+    if (streak >= 3) {
+        playComboSound();
+    }
+
+    else {
+        playHitSound();
+    }
+
+
+    roundNumber++;
+
+    spawnTarget();
+}
+
+
+/* ============================================================
+   MISS
+   ============================================================ */
+
+function missTarget(auto = false) {
+
+    misses++;
+
+    streak = 0;
+
+
+    if (auto) {
+
+        feedbackText =
+            "TOO SLOW";
+
+        feedbackColor =
+            COLORS.YELLOW;
+    }
+
+    else {
+
+        feedbackText =
+            "MISS";
+
+        feedbackColor =
+            COLORS.RED;
+    }
+
+
+    feedbackTimer = 0.45;
+
+
+    addFloatingText(
+        feedbackText,
+        targetX,
+        targetY,
+        feedbackColor
+    );
+
+
+    playMissSound();
+}
+
+
+/* ============================================================
+   RESULTS
+   ============================================================ */
+
+function finishGame() {
+
+    state = "results";
+
+    document.body.classList.remove(
+        "game"
+    );
+
+
+    const acc =
+        accuracyValue();
+
+
+    const avgReaction =
+        reactionTimes.length
+        ? reactionTimes.reduce(
+            (a, b) => a + b,
+            0
+        ) / reactionTimes.length
+        : 0;
+
+
+    let newRecord = false;
+
+
+    if (score > data.high_score) {
+
+        data.high_score =
+            score;
+
+        newRecord = true;
+    }
+
+
+    if (
+        acc >
+        data.best_accuracy
+    ) {
+
+        data.best_accuracy =
+            acc;
+    }
+
+
+    if (
+        avgReaction > 0 &&
+        avgReaction <
+        data.best_reaction
+    ) {
+
+        data.best_reaction =
+            avgReaction;
+    }
+
+
+    if (
+        bestStreakSession >
+        data.best_streak
+    ) {
+
+        data.best_streak =
+            bestStreakSession;
+    }
+
+
+    data.sessions.push({
+
+        score: score,
+
+        accuracy:
+            Number(
+                acc.toFixed(1)
+            ),
+
+        hits: hits,
+
+        misses: misses,
+
+        reaction:
+            Math.round(
+                avgReaction
+            ),
+
+        streak:
+            bestStreakSession,
+
+        mode:
+            selectedMode,
+
+        difficulty:
+            selectedDifficulty
+    });
+
+
+    data.sessions =
+        data.sessions.slice(-10);
+
+
+    saveData();
+
+
+    if (newRecord) {
+        playRecordSound();
+    }
+}
+
+
+/* ============================================================
+   HUD
+   ============================================================ */
+
+function drawHUD(timeLeft) {
+
+    ctx.fillStyle =
+        COLORS.PANEL;
+
+    ctx.fillRect(
+        0,
+        0,
+        WIDTH,
+        105
+    );
+
+
+    drawText(
+        "SCORE",
+        20,
+        COLORS.MUTED,
+        25,
+        14
+    );
+
+    drawText(
+        score,
+        70,
+        COLORS.WHITE,
+        25,
+        35
+    );
+
+
+    drawText(
+        "ACCURACY",
+        20,
+        COLORS.MUTED,
+        200,
+        14
+    );
+
+    drawText(
+        `${accuracyValue().toFixed(1)}%`,
+        70,
+        COLORS.WHITE,
+        200,
+        35
+    );
+
+
+    drawText(
+        "STREAK",
+        20,
+        COLORS.MUTED,
+        390,
+        14
+    );
+
+    drawText(
+        streak,
+        70,
+        streak >= 3
+            ? COLORS.YELLOW
+            : COLORS.WHITE,
+        390,
+        35
+    );
+
+
+    drawText(
+        "MODE",
+        20,
+        COLORS.MUTED,
+        555,
+        14
+    );
+
+    drawText(
+        selectedMode,
+        34,
+        COLORS.WHITE,
+        555,
+        40
+    );
+
+    drawText(
+        selectedDifficulty,
+        25,
+        COLORS.MUTED,
+        555,
+        73
+    );
+
+
+    if (
+        selectedMode !==
+        "Endless"
+    ) {
+
+        drawText(
+            timeLeft.toFixed(1),
+            70,
+            timeLeft <= 5
+                ? COLORS.RED
+                : COLORS.WHITE,
+            WIDTH - 130,
+            30
+        );
+
+
+        ctx.fillStyle =
+            COLORS.PANEL2;
+
+        roundedRect(
+            25,
+            91,
+            WIDTH - 50,
+            6,
+            3
+        );
+
+        ctx.fill();
+
+
+        ctx.fillStyle =
+            COLORS.RED;
+
+        roundedRect(
+            25,
+            91,
+            (WIDTH - 50) *
+            clamp(
+                timeLeft /
+                GAME_TIME,
+                0,
+                1
+            ),
+            6,
+            3
+        );
+
+        ctx.fill();
+    }
+}
+
+
+/* ============================================================
+   MENU
+   ============================================================ */
+
+function drawMenu() {
+
+    ctx.fillStyle =
+        COLORS.BG;
+
+    ctx.fillRect(
+        0,
+        0,
+        WIDTH,
+        HEIGHT
+    );
+
+
+    drawText(
+        "AIM TRAINER",
+        100,
+        COLORS.WHITE,
+        WIDTH / 2,
+        90,
+        true
+    );
+
+
+    drawText(
+        "Train your aim. Improve your reaction time.",
+        34,
+        COLORS.MUTED,
+        WIDTH / 2,
+        175,
+        true
+    );
+
+
+    drawPanel(
+        150,
+        205,
+        800,
+        330
+    );
+
+
+    drawText(
+        "GAME MODE",
+        25,
+        COLORS.MUTED,
+        200,
+        235
+    );
+
+
+    drawText(
+        selectedMode,
+        58,
+        COLORS.CYAN,
+        200,
+        265
+    );
+
+
+    drawText(
+        "< / >  Change mode",
+        25,
+        COLORS.MUTED,
+        205,
+        325
+    );
+
+
+    drawText(
+        "DIFFICULTY",
+        25,
+        COLORS.MUTED,
+        600,
+        235
+    );
+
+
+    drawText(
+        selectedDifficulty,
+        58,
+        COLORS.RED,
+        600,
+        265
+    );
+
+
+    drawText(
+        "UP / DOWN  Change difficulty",
+        25,
+        COLORS.MUTED,
+        600,
+        325
+    );
+
+
+    const descriptions = {
+
+        Classic:
+            "Targets move and disappear if you wait too long.",
+
+        Speed:
+            "Targets get faster as the session continues.",
+
+        Precision:
+            "Smaller targets. Higher score multiplier.",
+
+        Endless:
+            "No timer. Keep going until you stop.",
+
+        Reaction:
+            "Targets move unpredictably. React quickly."
+    };
+
+
+    drawText(
+        descriptions[selectedMode],
+        25,
+        COLORS.WHITE,
+        WIDTH / 2,
+        395,
+        true
+    );
+
+
+    drawText(
+        "ENTER  START",
+        34,
+        COLORS.GREEN,
+        WIDTH / 2,
+        450,
+        true
+    );
+
+
+    drawText(
+        "S  Settings     H  History     BACKSPACE  Quit",
+        25,
+        COLORS.MUTED,
+        WIDTH / 2,
+        495,
+        true
+    );
+
+
+    drawText(
+        `BEST SCORE  ${data.high_score.toLocaleString()}`,
+        25,
+        COLORS.YELLOW,
+        WIDTH / 2,
+        575,
+        true
+    );
+}
+
+
+/* ============================================================
+   SETTINGS
+   ============================================================ */
+
+function drawSettings() {
+
+    ctx.fillStyle =
+        COLORS.BG;
+
+    ctx.fillRect(
+        0,
+        0,
+        WIDTH,
+        HEIGHT
+    );
+
+
+    drawText(
+        "SETTINGS",
+        100,
+        COLORS.WHITE,
+        WIDTH / 2,
+        90,
+        true
+    );
+
+
+    drawPanel(
+        250,
+        175,
+        600,
+        390
+    );
+
+
+    drawText(
+        "CROSSHAIR",
+        34,
+        COLORS.WHITE,
+        300,
+        220
+    );
+
+
+    drawText(
+        crosshairEnabled
+            ? "ON"
+            : "OFF",
+        34,
+        crosshairEnabled
+            ? COLORS.GREEN
+            : COLORS.RED,
+        700,
+        220
+    );
+
+
+    drawText(
+        "CROSSHAIR STYLE",
+        34,
+        COLORS.WHITE,
+        300,
+        280
+    );
+
+
+    drawText(
+        crosshairStyle + 1,
+        34,
+        COLORS.CYAN,
+        700,
+        280
+    );
+
+
+    drawText(
+        "HIT EFFECTS",
+        34,
+        COLORS.WHITE,
+        300,
+        340
+    );
+
+
+    drawText(
+        effectsEnabled
+            ? "ON"
+            : "OFF",
+        34,
+        effectsEnabled
+            ? COLORS.GREEN
+            : COLORS.RED,
+        700,
+        340
+    );
+
+
+    drawText(
+        "SOUND",
+        34,
+        COLORS.WHITE,
+        300,
+        400
+    );
+
+
+    drawText(
+        "ON",
+        34,
+        COLORS.GREEN,
+        700,
+        400
+    );
+
+
+    drawText(
+        "SPACE = Toggle crosshair",
+        25,
+        COLORS.MUTED,
+        WIDTH / 2,
+        465,
+        true
+    );
+
+
+    drawText(
+        "C = Change crosshair",
+        25,
+        COLORS.MUTED,
+        WIDTH / 2,
+        490,
+        true
+    );
+
+
+    drawText(
+        "E = Toggle effects",
+        25,
+        COLORS.MUTED,
+        WIDTH / 2,
+        515,
+        true
+    );
+
+
+    drawText(
+        "BACKSPACE = Back",
+        25,
+        COLORS.WHITE,
+        WIDTH / 2,
+        555,
+        true
+    );
+}
+
+
+/* ============================================================
+   HISTORY
+   ============================================================ */
+
+function drawHistory() {
+
+    ctx.fillStyle =
+        COLORS.BG;
+
+    ctx.fillRect(
+        0,
+        0,
+        WIDTH,
+        HEIGHT
+    );
+
+
+    drawText(
+        "SESSION HISTORY",
+        100,
+        COLORS.WHITE,
+        WIDTH / 2,
+        75,
+        true
+    );
+
+
+    drawText(
+        "Your last 10 sessions",
+        34,
+        COLORS.MUTED,
+        WIDTH / 2,
+        125,
+        true
+    );
+
+
+    const sessions =
+        data.sessions;
+
+
+    if (!sessions.length) {
+
+        drawText(
+            "No sessions yet.",
+            34,
+            COLORS.MUTED,
+            WIDTH / 2,
+            350,
+            true
+        );
+    }
+
+    else {
+
+        const start =
+            Math.max(
+                0,
+                sessions.length -
+                8 -
+                historyScroll
+            );
+
+        const end =
+            sessions.length -
+            historyScroll;
+
+        const visible =
+            sessions.slice(
+                start,
+                end
+            );
+
+
+        let y = 185;
+
+
+        for (
+            let i =
+                visible.length - 1;
+            i >= 0;
+            i--
+        ) {
+
+            const session =
+                visible[i];
+
+
+            drawPanel(
+                130,
+                y,
+                840,
+                52,
+                8
+            );
+
+
+            drawText(
+                session.mode,
+                25,
+                COLORS.CYAN,
+                150,
+                y + 16
+            );
+
+
+            drawText(
+                session.difficulty,
+                25,
+                COLORS.MUTED,
+                280,
+                y + 16
+            );
+
+
+            drawText(
+                session.score.toLocaleString(),
+                25,
+                COLORS.WHITE,
+                410,
+                y + 16
+            );
+
+
+            drawText(
+                `${session.accuracy.toFixed(1)}%`,
+                25,
+                COLORS.WHITE,
+                560,
+                y + 16
+            );
+
+
+            drawText(
+                `${session.reaction} ms`,
+                25,
+                COLORS.WHITE,
+                700,
+                y + 16
+            );
+
+
+            drawText(
+                `x${session.streak}`,
+                25,
+                COLORS.YELLOW,
+                870,
+                y + 16
+            );
+
+
+            y += 62;
+        }
+    }
+
+
+    drawText(
+        "BACKSPACE = Back",
+        25,
+        COLORS.MUTED,
+        WIDTH / 2,
+        HEIGHT - 45,
+        true
+    );
+}
+
+
+/* ============================================================
+   RESULTS
+   ============================================================ */
+
+function drawResults() {
+
+    ctx.fillStyle =
+        COLORS.BG;
+
+    ctx.fillRect(
+        0,
+        0,
+        WIDTH,
+        HEIGHT
+    );
+
+
+    drawText(
+        "SESSION COMPLETE",
+        100,
+        COLORS.WHITE,
+        WIDTH / 2,
+        80,
+        true
+    );
+
+
+    drawPanel(
+        200,
+        155,
+        700,
+        425
+    );
+
+
+    const acc =
+        accuracyValue();
+
+
+    const average =
+        reactionTimes.length
+        ? reactionTimes.reduce(
+            (a, b) => a + b,
+            0
+        ) / reactionTimes.length
+        : 0;
+
+
+    const best =
+        reactionTimes.length
+        ? Math.min(
+            ...reactionTimes
+        )
+        : 0;
+
+
+    const stats = [
+
+        [
+            "SCORE",
+            score.toLocaleString(),
+            COLORS.YELLOW
+        ],
+
+        [
+            "ACCURACY",
+            `${acc.toFixed(1)}%`,
+            COLORS.GREEN
+        ],
+
+        [
+            "HITS",
+            hits,
+            COLORS.WHITE
+        ],
+
+        [
+            "MISSES",
+            misses,
+            COLORS.RED
+        ],
+
+        [
+            "AVG REACTION",
+            `${average.toFixed(0)} ms`,
+            COLORS.CYAN
+        ],
+
+        [
+            "BEST REACTION",
+            `${best.toFixed(0)} ms`,
+            COLORS.PURPLE
+        ],
+
+        [
+            "MAX STREAK",
+            bestStreakSession,
+            COLORS.YELLOW
+        ]
+    ];
+
+
+    let y = 190;
+
+
+    for (const stat of stats) {
+
+        drawText(
+            stat[0],
+            25,
+            COLORS.MUTED,
+            270,
+            y
+        );
+
+
+        drawText(
+            stat[1],
+            34,
+            stat[2],
+            610,
+            y - 4
+        );
+
+
+        y += 48;
+    }
+
+
+    drawText(
+        "ENTER  PLAY AGAIN",
+        34,
+        COLORS.GREEN,
+        WIDTH / 2,
+        610,
+        true
+    );
+
+
+    drawText(
+        "BACKSPACE  MENU",
+        25,
+        COLORS.MUTED,
+        WIDTH / 2,
+        655,
+        true
+    );
+}
+
+
+/* ============================================================
+   GAME DRAW
+   ============================================================ */
+
+function drawGame(timeLeft) {
+
+    ctx.fillStyle =
+        COLORS.BG;
+
+    ctx.fillRect(
+        0,
+        0,
+        WIDTH,
+        HEIGHT
+    );
+
+
+    drawHUD(timeLeft);
+
+    drawTarget();
+
+    drawEffects();
+
+
+    if (feedbackTimer > 0) {
+
+        drawText(
+            feedbackText,
+            34,
+            feedbackColor,
+            WIDTH / 2,
+            125,
+            true
+        );
+    }
+
+
+    drawCrosshair();
+}
+
+
+/* ============================================================
+   KEYBOARD
+   ============================================================ */
+
+window.addEventListener(
+    "keydown",
+    function(event) {
+
+        const key =
+            event.key.toLowerCase();
+
+
+        if (
+            [
+                "ArrowLeft",
+                "ArrowRight",
+                "ArrowUp",
+                "ArrowDown",
+                "Enter",
+                "Backspace",
+                " "
+            ].includes(event.key)
+        ) {
+            event.preventDefault();
+        }
+
+
+        if (
+            event.key === "F11" ||
+            (
+                key === "f" &&
+                event.ctrlKey &&
+                event.shiftKey
+            )
+        ) {
+
+            event.preventDefault();
+
+            toggleFullscreen();
+
+            return;
+        }
+
+
+        /* MENU */
+
+        if (state === "menu") {
+
+            if (event.key === "Enter") {
+
+                startGame();
+            }
+
+            else if (
+                event.key === "ArrowLeft"
+            ) {
+
+                modeIndex =
+                    (
+                        modeIndex -
+                        1 +
+                        MODES.length
+                    ) %
+                    MODES.length;
+
+                selectedMode =
+                    MODES[modeIndex];
+            }
+
+            else if (
+                event.key === "ArrowRight"
+            ) {
+
+                modeIndex =
+                    (
+                        modeIndex +
+                        1
+                    ) %
+                    MODES.length;
+
+                selectedMode =
+                    MODES[modeIndex];
+            }
+
+            else if (
+                event.key === "ArrowUp"
+            ) {
+
+                difficultyIndex =
+                    (
+                        difficultyIndex -
+                        1 +
+                        DIFFICULTY_NAMES.length
+                    ) %
+                    DIFFICULTY_NAMES.length;
+
+                selectedDifficulty =
+                    DIFFICULTY_NAMES[
+                        difficultyIndex
+                    ];
+            }
+
+            else if (
+                event.key === "ArrowDown"
+            ) {
+
+                difficultyIndex =
+                    (
+                        difficultyIndex +
+                        1
+                    ) %
+                    DIFFICULTY_NAMES.length;
+
+                selectedDifficulty =
+                    DIFFICULTY_NAMES[
+                        difficultyIndex
+                    ];
+            }
+
+            else if (key === "s") {
+
+                state = "settings";
+            }
+
+            else if (key === "h") {
+
+                state = "history";
+            }
+        }
+
+
+        /* SETTINGS */
+
+        else if (
+            state === "settings"
+        ) {
+
+            if (
+                event.code ===
+                "Space"
+            ) {
+
+                crosshairEnabled =
+                    !crosshairEnabled;
+            }
+
+            else if (key === "c") {
+
+                crosshairStyle =
+                    (
+                        crosshairStyle +
+                        1
+                    ) % 3;
+            }
+
+            else if (key === "e") {
+
+                effectsEnabled =
+                    !effectsEnabled;
+            }
+
+            else if (
+                event.key ===
+                "Backspace"
+            ) {
+
+                state = "menu";
+            }
+        }
+
+
+        /* HISTORY */
+
+        else if (
+            state === "history"
+        ) {
+
+            if (
+                event.key ===
+                "Backspace"
+            ) {
+
+                state = "menu";
+            }
+
+            else if (
+                event.key ===
+                "ArrowUp"
+            ) {
+
+                historyScroll =
+                    Math.min(
+                        historyScroll + 1,
+                        Math.max(
+                            0,
+                            data.sessions.length - 8
+                        )
+                    );
+            }
+
+            else if (
+                event.key ===
+                "ArrowDown"
+            ) {
+
+                historyScroll =
+                    Math.max(
+                        0,
+                        historyScroll - 1
+                    );
+            }
+        }
+
+
+        /* GAME */
+
+        else if (
+            state === "game"
+        ) {
+
+            if (
+                event.key ===
+                "Backspace"
+            ) {
+
+                state = "menu";
+
+                document.body.classList.remove(
+                    "game"
+                );
+            }
+        }
+
+
+        /* RESULTS */
+
+        else if (
+            state === "results"
+        ) {
+
+            if (
+                event.key ===
+                "Enter"
+            ) {
+
+                startGame();
+            }
+
+            else if (
+                event.key ===
+                "Backspace"
+            ) {
+
+                state = "menu";
+            }
+        }
+    }
+);
+
+
+/* ============================================================
+   MOUSE
+   ============================================================ */
+
+canvas.addEventListener(
+    "mousemove",
+    function(event) {
+
+        const position =
+            getMousePosition(event);
+
+        mouseX = position.x;
+        mouseY = position.y;
+    }
+);
+
+
+canvas.addEventListener(
+    "mousedown",
+    function(event) {
+
+        unlockAudio();
+
+        canvas.focus();
+
+
+        if (
+            state !== "game" ||
+            event.button !== 0
+        ) {
+            return;
+        }
+
+
+        const position =
+            getMousePosition(event);
+
+
+        mouseX = position.x;
+        mouseY = position.y;
+
+
+        const distance =
+            Math.hypot(
+                position.x - targetX,
+                position.y - targetY
+            );
+
+
+        if (
+            distance <=
+            targetRadius
+        ) {
+
+            hitTarget();
+        }
+
+        else {
+
+            missTarget(false);
+        }
+    }
+);
+
+
+canvas.addEventListener(
+    "contextmenu",
+    function(event) {
+        event.preventDefault();
+    }
+);
+
+
+/* ============================================================
+   FULLSCREEN
+   ============================================================ */
+
+function toggleFullscreen() {
+
+    if (!document.fullscreenElement) {
+
+        if (canvas.requestFullscreen) {
+
+            canvas.requestFullscreen()
+                .catch(() => {});
+        }
+    }
+
+    else {
+
+        if (document.exitFullscreen) {
+
+            document.exitFullscreen()
+                .catch(() => {});
+        }
+    }
+}
+
+
+/* ============================================================
+   MAIN LOOP
+   ============================================================ */
+
+function gameLoop(now) {
+
+    let dt =
+        (now - lastTime) /
+        1000;
+
+    lastTime = now;
+
+
+    if (dt > 0.05) {
+        dt = 0.05;
+    }
+
+
+    updateEffects(dt);
+
+
+    if (feedbackTimer > 0) {
+
+        feedbackTimer -= dt;
+    }
+
+
+    /* GAME UPDATE */
+
+    if (state === "game") {
+
+        const elapsed =
+            (
+                now -
+                gameStartTime
+            ) / 1000;
+
+
+        if (
+            selectedMode !==
+            "Endless"
+        ) {
+
+            const timeLeft =
+                Math.max(
+                    0,
+                    GAME_TIME -
+                    elapsed
+                );
+
+
+            if (timeLeft <= 0) {
+
+                finishGame();
+            }
+        }
+
+
+        if (state === "game") {
+
+            if (
+                selectedMode ===
+                "Reaction"
+            ) {
+
+                moveTarget(
+                    dt * 0.35
+                );
+            }
+
+            else {
+
+                moveTarget(dt);
+            }
+
+
+            targetMoveTimer -= dt;
+
+
+            if (
+                targetMoveTimer <= 0
+            ) {
+
+                missTarget(true);
+
+                roundNumber++;
+
+                spawnTarget();
+            }
+        }
+    }
+
+
+    /* DRAW */
+
+    if (state === "menu") {
+
+        drawMenu();
+    }
+
+    else if (
+        state === "settings"
+    ) {
+
+        drawSettings();
+    }
+
+    else if (
+        state === "history"
+    ) {
+
+        drawHistory();
+    }
+
+    else if (
+        state === "results"
+    ) {
+
+        drawResults();
+    }
+
+    else if (
+        state === "game"
+    ) {
+
+        const elapsed =
+            (
+                now -
+                gameStartTime
+            ) / 1000;
+
+
+        const timeLeft =
+            Math.max(
+                0,
+                GAME_TIME -
+                elapsed
+            );
+
+
+        drawGame(timeLeft);
+    }
+
+
+    requestAnimationFrame(
+        gameLoop
+    );
+}
+
+
+/* ============================================================
+   START
+   ============================================================ */
+
+canvas.focus();
+
+requestAnimationFrame(
+    gameLoop
+);
+
+</script>
+
+</body>
+</html>
